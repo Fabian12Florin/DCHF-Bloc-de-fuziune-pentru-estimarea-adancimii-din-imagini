@@ -73,9 +73,16 @@ class SmoothLoss(nn.Module):
             mean_pred = pred.mean(2, True).mean(3, True)
             pred = pred / (mean_pred + 1e-7)
 
-        pad_pred = self.replpad(pred)
+        #pad_pred = self.replpad(pred)
         if self.image_n is not None:
             img = outputs[self.image_n.format(side)].clone()
+
+            # Upsample pred to match image size if needed
+            if pred.shape[-2:] != img.shape[-2:]:
+                pred = F.interpolate(pred, size=img.shape[-2:], mode='bilinear', align_corners=False)
+        
+        pad_pred = self.replpad(pred)
+        if self.image_n is not None:
             m_rgb = torch.ones_like(img)
             m_rgb[:, 0, :, :] = 0.411 * m_rgb[:, 0, :, :]
             m_rgb[:, 1, :, :] = 0.432 * m_rgb[:, 1, :, :]

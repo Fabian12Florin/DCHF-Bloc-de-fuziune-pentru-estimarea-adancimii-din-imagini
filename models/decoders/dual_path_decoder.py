@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.layers import trunc_normal_
 from mmcv.ops.deform_conv import DeformConv2dFunction
+from models.decoders.fusion_module import *
 
 class DPDecoder(nn.Module):
     def __init__(self,
@@ -10,7 +11,7 @@ class DPDecoder(nn.Module):
                  norm_disp_range,
                  num_ch_dec = [16, 32, 64, 128, 256],
                  sfg_scales = [2],
-                 sfg_mode='MFM_SS2D', # stereo feature generator in [MFM_SS2D, MAMBA_FM ,AFB, MFM, Cat, Attn]
+                 sfg_mode='MFM_ACV', # stereo feature generator in [MFM_SS2D, MAMBA_FM ,AFB, MFM, Cat, Attn]
                  db_scales = [2],
                  db_mode='V0', # distilled branch in [SDFA, DeformConv]
                  dec_mode='',
@@ -106,24 +107,26 @@ class DPDecoder(nn.Module):
                     self.convblocks[("sfg", i, 0)] = CA_Block_V2(num_ch_out, norm_disp_range, image_size)
                 elif self.sfg_mode == 'Cat':
                     self.convblocks[("sfg", i, 0)] = CA_Block_Cat(num_ch_out, norm_disp_range, image_size)
-                    '''
                 elif self.sfg_mode == 'AFB':
                     self.convblocks[("sfg", i, 0)] = AFB_Block(num_ch_out)
                 elif self.sfg_mode == 'MAMBA_FM':
-                    self.convblocks[("sfg", i, 0)] = MFM_MambaSimpleBlock(num_ch_out)
+                    self.convblocks[("sfg", i, 0)] = MFM_GatedMLP(num_ch_out)
                 elif self.sfg_mode == 'MFM_SS2D':
-                    self.convblocks[("sfg", i ,0)] = MFM_SS2DSimpleBlock(num_ch_out)
+                    self.convblocks[("sfg", i ,0)] = MFM_DoubleGatedMLP(num_ch_out)
                 elif self.sfg_mode == 'MFM_Mamba':
-                    self.convblocks[("sfg", i, 0)] = CA_Block_V2_Mamba(num_ch_out, norm_disp_range, image_size) 
-                elif self.sfg_mode == 'MFM_DAWGWC':
-                    self.convblocks[("sfg", i, 0)] = MFM_DAV_GWC_Fusion(num_ch_out, norm_disp_range, image_size)
-                elif self.sfg_mode == 'MFM_ACV':
-                    self.convblocks[("sfg", i, 0)] = CA_Block_V2_ACV(num_ch_out, norm_disp_range, image_size)
-                    '''
+                    self.convblocks[("sfg", i, 0)] = CA_Block_V3_Mamba(num_ch_out, norm_disp_range, image_size) 
                 elif self.sfg_mode == 'MFM_DAV':
-                    self.convblocks[("sfg", i, 0)] = CA_Block_V2_DAV(num_ch_out, norm_disp_range, image_size)
-                elif self.sfg_mode == 'MFM_V2':
-                    self.convblocks[("sfg", i, 0)] = AdvancedMFM(num_ch_out, norm_disp_range, image_size)
+                    self.convblocks[("sfg", i, 0)] = CA_Block_V3_DAV(num_ch_out, norm_disp_range, image_size)
+                elif self.sfg_mode == 'MFM_DCW':
+                    self.convblocks[("sfg", i, 0)] = DCW_Block(num_ch_out, norm_disp_range, image_size)
+                elif self.sfg_mode == 'MFM_CWAF':
+                    self.convblocks[("sfg", i, 0)] = CWAF_Block(num_ch_out, norm_disp_range, image_size)
+                elif self.sfg_mode == 'MFM_ACV':
+                    self.convblocks[("sfg", i, 0)] = ACV_Block(num_ch_out, norm_disp_range, image_size)
+                elif self.sfg_mode == 'MFM_HMF':
+                    self.convblocks[("sfg", i, 0)] = HMF_Block(num_ch_out, norm_disp_range, image_size)
+                elif self.sfg_mode == 'MFM_DCHF':
+                    self.convblocks[("sfg", i, 0)] = DCHF_Block(num_ch_out, norm_disp_range)
         if stereo_out_ch != mono_out_ch:
             self.convblocks[("out-stereo", 0)] = nn.Sequential(
                 ConvBlock(num_ch_dec[0], num_ch_dec[0]),
@@ -396,6 +399,25 @@ class ConvBlock(nn.Module):
             out = self.nonlin(out)
         return out
 
+class InvResBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, expansion=4):
+        super().__init__()
+        mid_ch = in_ch * expansion
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, mid_ch, 1, bias=False),
+            nn.BatchNorm2d(mid_ch),
+            nn.ReLU6(inplace=True),
+            nn.Conv2d(mid_ch, mid_ch, 3, padding=1, groups=mid_ch, bias=False),
+            nn.BatchNorm2d(mid_ch),
+            nn.ReLU6(inplace=True),
+            nn.Conv2d(mid_ch, out_ch, 1, bias=False),
+            nn.BatchNorm2d(out_ch),
+        )
+        self.use_res = (in_ch == out_ch)
+    def forward(self, x):
+        out = self.block(x)
+        return out + x if self.use_res else out
+
 class CA_Block(nn.Module):
     def __init__(self, in_channels, norm_disp_range, train_image_size=None):
         super().__init__()
@@ -543,6 +565,7 @@ class CA_Block_V2(nn.Module):
         q = self.q_conv(t_feat)
         k = self.k_conv(s_feat)
         warped_feat = self._get_warped_frame(k, directs, image_shape)
+
         cost = (q.unsqueeze(2) * warped_feat).sum(dim=1) / (q.shape[1] ** 0.5)
         norm_cost = torch.softmax(cost, dim=1)
         x = self.redu(torch.cat([t_feat, norm_cost], dim=1))
@@ -1322,438 +1345,3 @@ class SELayer(nn.Module):
         y = self.avg_pool(x).view(b, c)
         y = self.fc(y).view(b, c, 1, 1)
         return x * y.expand_as(x)
-
-# Modificari
-class CA_Block_V2_DAV(nn.Module):
-    def __init__(self, in_channels, norm_disp_range, train_image_size=None, patch_size=1):
-        super().__init__()
-        self.norm_disp_range = norm_disp_range
-        self.train_image_size = train_image_size
-        cost_channels = len(norm_disp_range)
-
-        # Patch-based q/k
-        self.q_conv = nn.Conv2d(in_channels, in_channels // 4, 1)
-        self.k_conv = nn.Conv2d(in_channels, in_channels // 4, 1)
-
-        # DAV block (vectorized cosine similarity over patch features)
-        self.dav = DAV_Block_Vectorized(in_channels // 4, patch_size=patch_size)
-
-        # Cost volume filtering (3D Conv)
-        self.cost_filter = nn.Conv3d(1, 1, kernel_size=(3,3,3), padding=1)
-
-        # Normalization
-        self.norm_t = nn.GroupNorm(1, in_channels)
-        self.norm_c = nn.GroupNorm(1, cost_channels)
-
-        self.cost_expand = nn.Conv2d(cost_channels, in_channels, kernel_size=1)
-
-        # Dynamic fusion (alpha gating)
-        self.fusion_alpha = nn.Sequential(
-            nn.Conv2d(in_channels * 2, 1, 1),
-            nn.Sigmoid()
-        )
-
-        self.redu = nn.Sequential(
-            Conv3x3(in_channels + cost_channels, in_channels),
-            SELayer(in_channels),
-            nn.ELU())
-
-    def forward(self, feats, directs, image_shape):
-        t_feat = feats[0]
-        s_feat = feats[1]
-
-        q = self.q_conv(t_feat)
-        k = self.k_conv(s_feat)
-        warped_feat = self._get_warped_frame(k, directs, image_shape, q.shape[2:])  # [B, C, H, W, D]
-
-        # DAV cost volume
-        dav_cost = self.dav(q, warped_feat)  # [B, D, H, W]
-
-        # Filtering
-        dav_cost_3d = dav_cost.unsqueeze(1)  # [B, 1, D, H, W]
-        filtered_cost = self.cost_filter(dav_cost_3d).squeeze(1)  # [B, D, H, W]
-        norm_cost = torch.softmax(filtered_cost, dim=1)
-
-        # Normalize and fuse
-        t_feat_n = self.norm_t(t_feat)
-        norm_cost_n = self.norm_c(norm_cost)
-        cost_feat = self.cost_expand(norm_cost_n)  # [B, 256, H, W]
-        fusion_input = torch.cat([t_feat_n, cost_feat], dim=1)
-        alpha = self.fusion_alpha(fusion_input)
-        fused = alpha * t_feat_n + (1 - alpha) * cost_feat
-
-
-        if fused.shape[2:] != t_feat.shape[2:]:
-            fused = F.interpolate(fused, size=t_feat.shape[2:], mode='bilinear', align_corners=False)
-
-        x = self.redu(fused)
-        return x, norm_cost
-
-    def _get_warped_frame(self, x, directs, image_shape, target_hw):
-        B, C, Hx, Wx = x.shape
-        Ht, Wt = target_hw
-        D = len(self.norm_disp_range)
-
-        i_tetha = torch.zeros(1, 2, 3, device=x.device)
-        i_tetha[:, 0, 0] = 1
-        i_tetha[:, 1, 1] = 1
-        normal_coord = F.affine_grid(i_tetha, [1, 1, Hx, Wx], align_corners=True).to(x.device)
-        base_coord = normal_coord
-        zeros = torch.zeros_like(base_coord)
-
-        if self.train_image_size is not None and self.train_image_size[1] != image_shape[3]:
-            rel_scale = self.train_image_size[1] / image_shape[3]
-        else:
-            rel_scale = 1
-
-        frame_volume = []
-        for disp in self.norm_disp_range:
-            disp_map = zeros.clone()
-            disp_map[..., 0] += disp * 2 * rel_scale
-            grid_coords = disp_map * directs + base_coord
-            warped = F.grid_sample(x, grid_coords, mode='bilinear', padding_mode='border', align_corners=True)
-            frame_volume.append(warped.unsqueeze(2))
-
-        warped_feat = torch.cat(frame_volume, dim=2)  # [B, C, D, Hx, Wx]
-        warped_feat = warped_feat.permute(0, 1, 3, 4, 2)  # [B, C, Hx, Wx, D]
-
-        if (Hx, Wx) != (Ht, Wt):
-            warped_feat = warped_feat.permute(0, 4, 1, 2, 3)  # [B, D, C, Hx, Wx]
-            warped_feat = warped_feat.reshape(B * D, C, Hx, Wx)
-            warped_feat = F.interpolate(warped_feat, size=(Ht, Wt), mode='bilinear', align_corners=False)
-            warped_feat = warped_feat.view(B, D, C, Ht, Wt).permute(0, 2, 3, 4, 1)
-
-        return warped_feat
-
-class DAV_Block_Vectorized(nn.Module):
-    def __init__(self, in_channels, patch_size=3):
-        super().__init__()
-        self.patch_size = patch_size
-        self.unfold = nn.Unfold(kernel_size=patch_size, padding=patch_size // 2)
-
-    def forward(self, q, warped_feat):
-        B, C, H, W = q.shape
-        D = warped_feat.shape[-1]
-        P = self.patch_size
-
-        # Step 1: Unfold and normalize q
-        q_unfold = self.unfold(q)                     # [B, CP^2, H*W]
-        q_unfold = F.normalize(q_unfold, dim=1)       # [B, CP^2, H*W]
-        q_unfold = q_unfold.permute(0, 2, 1).unsqueeze(3)  # [B, HW, F, 1]
-
-        # Step 2: Unfold warped_feat all at once
-        warped_feat = warped_feat.permute(0, 4, 1, 2, 3)  # [B, D, C, H, W]
-        warped_feat = warped_feat.reshape(B * D, C, H, W)
-
-        # Number of features per patch
-        patch_features = C * P * P
-
-        # Unfold and normalize
-        k_unfold = self.unfold(warped_feat)                       # [B*D, CP^2, H*W]
-        k_unfold = F.normalize(k_unfold, dim=1)                   # [B*D, CP^2, H*W]
-        k_unfold = k_unfold.view(B, D, patch_features, H * W)     # [B, D, F, HW]
-        k_unfold = k_unfold.permute(0, 3, 2, 1)                   # [B, HW, F, D]
-
-        # Step 3: einsum for cosine sim: [B, HW, F, 1] × [B, HW, F, D] → [B, HW, D]
-        sim = torch.einsum("bnfc,bnfd->bnd", q_unfold, k_unfold)  # [B, HW, D]
-        sim = sim.view(B, H, W, D).permute(0, 3, 1, 2)            # [B, D, H, W]
-
-        return sim
-
-###
-'''
-class DAV_Block_Chunked(nn.Module):
-    def __init__(self, in_channels, patch_size=3, chunk_size=4):
-        super().__init__()
-        self.patch_size = patch_size
-        self.chunk_size = chunk_size
-
-        # GroupNorm for stability before unfolding
-        self.norm_qk = nn.GroupNorm(1, in_channels)
-
-        print(type(patch_size))
-        # Unfold operation
-        self.unfold = nn.Unfold(kernel_size=patch_size, padding=patch_size[0] // 2)
-
-        # 3D Conv for filtering
-        self.cost_filter = nn.Conv3d(1, 1, kernel_size=(3, 3, 3), padding=1, bias=False)
-
-    def forward(self, q, warped_feat):
-        B, C, H, W = q.shape
-        D = warped_feat.shape[-1]
-
-        # Apply GroupNorm before unfolding
-        q = self.norm_qk(q)
-        q_patches = self.unfold(q)
-        q_patches = F.normalize(q_patches, dim=1)
-        q_patches = q_patches.permute(0, 2, 1)
-
-        # Initialize cost volume
-        cost_volume = torch.zeros((B, D, H, W), device=q.device)
-
-        # Process chunks
-        for d_start in range(0, D, self.chunk_size):
-            d_end = min(d_start + self.chunk_size, D)
-            chunk_size = d_end - d_start
-
-            k = warped_feat[..., d_start:d_end]
-            k = k.permute(0, 4, 1, 2, 3).reshape(B * chunk_size, C, H, W)
-            k = self.norm_qk(k)
-
-            k_patches = self.unfold(k)
-            k_patches = F.normalize(k_patches, dim=1)
-            k_patches = k_patches.view(B, chunk_size, -1, H * W).permute(0, 3, 2, 1)
-
-            sim = torch.einsum('bnf,bnfd->bnd', q_patches, k_patches)
-            sim = sim.view(B, H, W, chunk_size).permute(0, 3, 1, 2)
-            cost_volume[:, d_start:d_end, :, :] = sim
-
-        cost_volume = torch.softmax(cost_volume, dim=1)
-        cost_volume = cost_volume.unsqueeze(1)
-        filtered_cost = self.cost_filter(cost_volume).squeeze(1)
-
-        return filtered_cost
-
-
-class CA_Block_V2_DAV(nn.Module):
-    def __init__(self, in_channels, norm_disp_range, patch_size=3, chunk_size=4):
-        super().__init__()
-        self.norm_disp_range = norm_disp_range
-        cost_channels = len(norm_disp_range)
-
-        self.q_conv = nn.Conv2d(in_channels, in_channels // 4, kernel_size=1)
-        self.k_conv = nn.Conv2d(in_channels, in_channels // 4, kernel_size=1)
-
-        self.dav = DAV_Block_Chunked(in_channels // 4, patch_size, chunk_size)
-
-        self.norm_t = nn.GroupNorm(1, in_channels)
-        self.norm_c = nn.GroupNorm(1, cost_channels)
-        self.cost_expand = nn.Conv2d(cost_channels, in_channels, kernel_size=1)
-
-        self.fusion_alpha = nn.Sequential(
-            nn.Conv2d(in_channels * 2, 1, kernel_size=1),
-            nn.Sigmoid()
-        )
-
-        self.redu = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
-            nn.ELU(),
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
-        )
-
-    def forward(self, feats, directs, image_shape):
-        t_feat, s_feat = feats
-        q = self.q_conv(t_feat)
-        k = self.k_conv(s_feat)
-
-        warped_feat = self._get_warped_frame(k, directs, image_shape, q.shape[2:])
-        norm_cost = self.dav(q, warped_feat)
-
-        best_disp = torch.argmax(norm_cost, dim=1, keepdim=True).float()
-
-        t_feat_n = self.norm_t(t_feat)
-        norm_cost_n = self.norm_c(norm_cost)
-        cost_feat = self.cost_expand(norm_cost_n)
-
-        fusion_input = torch.cat([t_feat_n, cost_feat], dim=1)
-        alpha = self.fusion_alpha(fusion_input)
-        fused = alpha * t_feat_n + (1 - alpha) * cost_feat
-
-        if fused.shape[2:] != t_feat.shape[2:]:
-            fused = F.interpolate(fused, size=t_feat.shape[2:], mode='bilinear', align_corners=False)
-
-        output = self.redu(fused)
-        return output, best_disp
-
-    def _get_warped_frame(self, x, directs, image_shape, target_hw):
-        B, C, Hx, Wx = x.shape
-        Ht, Wt = target_hw
-        D = len(self.norm_disp_range)
- 
-        i_tetha = torch.zeros(1, 2, 3, device=x.device)
-        i_tetha[:, 0, 0] = 1
-        i_tetha[:, 1, 1] = 1
-        normal_coord = F.affine_grid(i_tetha, [1, 1, Hx, Wx], align_corners=True).to(x.device)
-        base_coord = normal_coord
-        zeros = torch.zeros_like(base_coord)
- 
-        if self.train_image_size is not None and self.train_image_size[1] != image_shape[3]:
-            rel_scale = self.train_image_size[1] / image_shape[3]
-        else:
-            rel_scale = 1
- 
-        frame_volume = []
-        for disp in self.norm_disp_range:
-            disp_map = zeros.clone()
-            disp_map[..., 0] += disp * 2 * rel_scale
-            grid_coords = disp_map * directs + base_coord
-            warped = F.grid_sample(x, grid_coords, mode='bilinear', padding_mode='border', align_corners=True)
-            frame_volume.append(warped.unsqueeze(2))
- 
-        warped_feat = torch.cat(frame_volume, dim=2)  # [B, C, D, Hx, Wx]
-        warped_feat = warped_feat.permute(0, 1, 3, 4, 2)  # [B, C, Hx, Wx, D]
- 
-        if (Hx, Wx) != (Ht, Wt):
-            warped_feat = warped_feat.permute(0, 4, 1, 2, 3)  # [B, D, C, Hx, Wx]
-            warped_feat = warped_feat.reshape(B * D, C, Hx, Wx)
-            warped_feat = F.interpolate(warped_feat, size=(Ht, Wt), mode='bilinear', align_corners=False)
-            warped_feat = warped_feat.view(B, D, C, Ht, Wt).permute(0, 2, 3, 4, 1)
- 
-        return warped_feat
-'''
-
-class AdvancedMFM(nn.Module):
-    def __init__(self, in_channels, norm_disp_range, train_image_size=None, reduction_factor=4):
-        super().__init__()
-        self.norm_disp_range = norm_disp_range
-        self.train_image_size = train_image_size
-        self.max_disp = len(norm_disp_range)
-        
-        # Reduce feature dimensions for memory efficiency
-        reduced_channels = in_channels // reduction_factor
-        
-        # Feature reduction for query and key
-        self.q_conv = nn.Sequential(
-            nn.Conv2d(in_channels, reduced_channels, kernel_size=1, bias=False),
-            nn.GroupNorm(8, reduced_channels),
-            nn.ELU()
-        )
-        
-        self.k_conv = nn.Sequential(
-            nn.Conv2d(in_channels, reduced_channels, kernel_size=1, bias=False),
-            nn.GroupNorm(8, reduced_channels),
-            nn.ELU()
-        )
-        
-        # Global context branch
-        self.global_attn = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(reduced_channels, reduced_channels // 2, kernel_size=1),
-            nn.ELU(),
-            nn.Conv2d(reduced_channels // 2, reduced_channels, kernel_size=1)
-        )
-        
-        # Local context branch
-        self.local_attn = nn.Sequential(
-            nn.Conv2d(reduced_channels, reduced_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(8, reduced_channels),
-            nn.ELU()
-        )
-        
-        # Attention fusion
-        self.attn_fusion = nn.Sequential(
-            nn.Conv2d(reduced_channels * 2, reduced_channels, kernel_size=1),
-            nn.ELU(),
-            nn.Conv2d(reduced_channels, self.max_disp, kernel_size=1)
-        )
-        
-        # Cost volume refinement
-        self.refine_cost = nn.Sequential(
-            nn.Conv2d(self.max_disp, self.max_disp, kernel_size=3, padding=1, groups=self.max_disp),
-            nn.ELU(),
-            nn.Conv2d(self.max_disp, self.max_disp, kernel_size=1)
-        )
-        
-        # Feature fusion
-        self.fusion = nn.Sequential(
-            Conv3x3(in_channels + self.max_disp, in_channels),
-            SELayer(in_channels),
-            nn.ELU()
-        )
-
-    def forward(self, feats, directs, image_shape):
-        left_feat, right_feat = feats[0], feats[1]
-        
-        # Feature dimension reduction
-        q = self.q_conv(left_feat)
-        k = self.k_conv(right_feat)
-        
-        # Hierarchical attention generation
-        global_feat = self.global_attn(q)
-        local_feat = self.local_attn(q)
-        
-        # Broadcast global features
-        global_feat = global_feat.expand(-1, -1, q.shape[2], q.shape[3])
-        
-        # Combine global and local features
-        combined_feat = torch.cat([global_feat, local_feat], dim=1)
-        attn_weights = self.attn_fusion(combined_feat)
-        
-        # Warp features with attention-guided weights
-        warped_volume = self._get_attention_warped_features(
-            k, attn_weights, directs, image_shape, q.shape[2:]
-        )
-        
-        # Refine cost volume
-        cost = self.refine_cost(warped_volume)
-        norm_cost = torch.softmax(cost, dim=1)
-        
-        # Fuse features
-        x = self.fusion(torch.cat([left_feat, norm_cost], dim=1))
-        
-        return x, norm_cost
-    
-    def _get_attention_warped_features(self, x, attention_weights, directs, image_shape, target_hw):
-        B, C, Hx, Wx = x.shape
-        Ht, Wt = target_hw
-        D = len(self.norm_disp_range)
-        
-        # Initialize the warped volume container
-        warped_volume = torch.zeros((B, D, Ht, Wt), device=x.device)
-        
-        # Generate base coordinate grid
-        i_tetha = torch.zeros(1, 2, 3, device=x.device)
-        i_tetha[:, 0, 0] = 1
-        i_tetha[:, 1, 1] = 1
-        base_grid = F.affine_grid(i_tetha, [1, 1, Hx, Wx], align_corners=True)
-        base_grid = base_grid.repeat(B, 1, 1, 1)
-        zeros = torch.zeros_like(base_grid)
-        
-        # Scale factor for different image sizes
-        if self.train_image_size is not None and self.train_image_size[1] != image_shape[3]:
-            rel_scale = self.train_image_size[1] / image_shape[3]
-        else:
-            rel_scale = 1
-        
-        # Process in chunks for memory efficiency
-        chunk_size = min(8, D)
-        for d_start in range(0, D, chunk_size):
-            d_end = min(d_start + chunk_size, D)
-            chunk_disp = self.norm_disp_range[d_start:d_end]
-            
-            for idx, disp in enumerate(chunk_disp):
-                d_idx = d_start + idx
-                
-                # Create disparity offset
-                disp_map = zeros.clone()
-                disp_map[..., 0] = disp_map[..., 0] + disp * 2 * rel_scale
-                
-                # Apply directional offset
-                grid_coords = disp_map * directs.view(-1, 1, 1, 1) + base_grid
-                
-                # Warp features using grid sample
-                warped_feat = F.grid_sample(
-                    x, grid_coords, 
-                    mode='bilinear', 
-                    padding_mode='border', 
-                    align_corners=True
-                )
-                
-                # Apply attention weights to warped features
-                attn_weight = attention_weights[:, d_idx:d_idx+1]
-                if warped_feat.shape[2:] != attn_weight.shape[2:]:
-                    warped_feat = F.interpolate(
-                        warped_feat, 
-                        size=attn_weight.shape[2:], 
-                        mode='bilinear', 
-                        align_corners=False
-                    )
-                
-                # Get weighted features for this disparity level
-                weighted_feat = torch.mean(warped_feat, dim=1, keepdim=True)
-                weighted_feat = weighted_feat * F.sigmoid(attn_weight)
-                
-                # Add to volume
-                warped_volume[:, d_idx] = weighted_feat.squeeze(1)
-        
-        return warped_volume

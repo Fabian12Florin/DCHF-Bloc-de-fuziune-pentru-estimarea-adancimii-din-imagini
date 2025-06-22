@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.decoders.submodule import BasicConv
 
 class channelAtt(nn.Module):
     def __init__(self, cv_chan, im_chan):
@@ -86,3 +85,56 @@ class hourglass_att(nn.Module):
 
         conv = self.conv1_up(conv1)
         return conv
+    
+class BasicConv(nn.Module):
+    def __init__(self, in_channels, out_channels, deconv=False, is_3d=False, bn=True, relu=True, **kwargs):
+        super(BasicConv, self).__init__()
+
+        self.relu = relu
+        self.use_bn = bn
+        if is_3d:
+            if deconv:
+                self.conv = nn.ConvTranspose3d(in_channels, out_channels, bias=False, **kwargs)
+            else:
+                self.conv = nn.Conv3d(in_channels, out_channels, bias=False, **kwargs)
+            self.bn = nn.BatchNorm3d(out_channels)
+        else:
+            if deconv:
+                self.conv = nn.ConvTranspose2d(in_channels, out_channels, bias=False, **kwargs)
+            else:
+                self.conv = nn.Conv2d(in_channels, out_channels, bias=False, **kwargs)
+            self.bn = nn.BatchNorm2d(out_channels)
+
+    def forward(self, x):
+        x = self.conv(x)
+        if self.use_bn:
+            x = self.bn(x)
+        if self.relu:
+            x = nn.LeakyReLU()(x)#, inplace=True)
+        return x
+    
+def norm_correlation(fea1, fea2):
+    cost = torch.mean(((fea1/(torch.norm(fea1, 2, 1, True)+1e-05)) * (fea2/(torch.norm(fea2, 2, 1, True)+1e-05))), dim=1, keepdim=True)
+    return cost
+
+def build_norm_correlation_volume(refimg_fea, targetimg_fea, maxdisp):
+    B, C, H, W = refimg_fea.shape
+    volume = refimg_fea.new_zeros([B, 1, maxdisp, H, W])
+    for i in range(maxdisp):
+        if i > 0:
+            volume[:, :, i, :, i:] = norm_correlation(refimg_fea[:, :, :, i:], targetimg_fea[:, :, :, :-i])
+        else:
+            volume[:, :, i, :, :] = norm_correlation(refimg_fea, targetimg_fea)
+    volume = volume.contiguous()
+    return volume
+
+def build_absdiff_volume(refimg_fea, targetimg_fea, maxdisp):
+    B, C, H, W = refimg_fea.shape
+    volume = refimg_fea.new_zeros([B, C, maxdisp, H, W])
+    for i in range(maxdisp):
+        if i > 0:
+            volume[:, :, i, :, i:] = torch.abs(refimg_fea[:, :, :, i:] - targetimg_fea[:, :, :, :-i])
+        else:
+            volume[:, :, i, :, :] = torch.abs(refimg_fea - targetimg_fea)
+    volume = volume.mean(1, keepdim=True)  # mean over channels, shape [B, 1, D, H, W]
+    return volume.contiguous()

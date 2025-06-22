@@ -7,8 +7,10 @@ from torchvision.models.vgg import vgg19
 
 from models.backbones.resnet import ResNet_Backbone
 from models.backbones.swin import get_orgwintrans_backbone
+from models.backbones.mambadepth import MambaDepthEncoder
 from models.base_model import Base_of_Model
 from models.decoders.dual_path_decoder import DPDecoder
+from models.decoders.uncertainty_decoder import UncertaintyDecoder
 from utils import platform_manager
 
 
@@ -35,6 +37,7 @@ class TiO_Depth(Base_of_Model):
             discrete_warp_scale=1,
             params_trained='',
             set_SCALE=None,
+            use_uncertainty=False, #
 
     ):
         self.init_opts = locals()
@@ -56,6 +59,7 @@ class TiO_Depth(Base_of_Model):
         self.params_trained = params_trained
         self.set_SCALE = set_SCALE
         self.stereo_SCALE = 5.4 if (self.out_ch == 1) else 1
+        self.use_uncertainty = use_uncertainty
 
         self.net_module = {}
         
@@ -81,25 +85,21 @@ class TiO_Depth(Base_of_Model):
             if layer_num > 34:
                 enc_ch_num = [ch_num * 4 for ch_num in enc_ch_num]
                 enc_ch_num[0] = 64
+        elif 'MambaDepth' in encoder_name:
+            self.net_module['encoder'] = MambaDepthEncoder(base_dim=64)  # adjust base_dim if needed
+            enc_ch_num = [64, 128, 256, 512]
 
         sfg_scales = [int(n) if len(n) == 1 else int(n[0]) for n in decoder_name.split('-')[1:]]
         db_scales = [int(n) if len(n) == 1 else int(n[0]) for n in decoder_name.split('_')[1:]]
         self.db_scales = db_scales
-        sfg_mode = 'MFM_V2'
+        sfg_mode = 'MFM_ACV'
         if 'Attn' in decoder_name:
             sfg_mode = 'Attn'
         if 'MFM' in decoder_name:
             sfg_mode = 'MFM'
         if 'CVGCat' in decoder_name:
             sfg_mode = 'Cat'
-        if 'AFB' in decoder_name:
-            sfg_mode = 'AFB'
-        if 'MAMBA_FM' in decoder_name:
-            sfg_mode = 'MAMBA_FM'
-        if 'MFM_SS2D' in decoder_name:
-            sfg_mode = 'MFM_SS2D'
-
-        sfg_mode = 'MFM_V2'
+        sfg_mode = 'MFM'
         
         db_mode = 'SDFA'
         self.use_db_mode = 'Out'
@@ -147,9 +147,23 @@ class TiO_Depth(Base_of_Model):
                                                    [d2d / disp for disp in out_range],
                                                    self.device)
             self.feat_net = Feat_Net(net_mode='vgg19', device=self.device)
+        else:
+            self.projector_d = None
+            self.feat_net = None
         
         self.used_path_dict = ['Mono', 'Stereo', 'Refine']
-                              
+        
+        '''
+        if self.use_uncertainty:
+            self.uncertainty_decoder = UncertaintyDecoder(
+                num_ch_enc=enc_ch_num,
+                num_ch_dec=self.decoder_ch_num,
+                scales=range(3),
+                num_output_channels=1,
+                use_skips=True
+            ).to(self.device)
+        '''
+        
     def forward(self, x, outputs, **kargs):
         x = (x - 0.45) / 0.225
         if self.is_train:
@@ -383,6 +397,13 @@ class TiO_Depth(Base_of_Model):
         for k in raw_outputs[1].keys():
             outputs['{}_{}_{}'.format(name+'mono', k, t_side)] = raw_outputs[1][k]
 
+        '''
+        # Compute uncertainty if enabled
+        if self.use_uncertainty:
+            uncertainty_outputs = self.uncertainty_decoder(feats)
+            for scale, uncert in uncertainty_outputs.items():
+                outputs['{}_uncertainty_{}_{}'.format(name+'mono', scale[1], t_side)] = uncert
+        '''
         return outputs
 
     def _forward_decoder_stereo(self, outputs, img_shape, directs):
@@ -429,6 +450,14 @@ class TiO_Depth(Base_of_Model):
             outputs['{}_disp_{}_{}'.format('stereo', 0, out_side)] = disp
             outputs['{}_depth_{}_{}'.format('stereo', 0, out_side)] = depth
 
+            '''
+            # Compute uncertainty for stereo predictions
+            if self.use_uncertainty:
+                enc_feats = [outputs[f'enc_feats_{out_side}_wog'][i] for i in range(len(outputs[f'enc_feats_{out_side}_wog']))]
+                uncertainty_outputs = self.uncertainty_decoder(enc_feats)
+                for scale, uncert in uncertainty_outputs.items():
+                    outputs['{}_uncertainty_{}_{}'.format('stereo', scale[1], out_side)] = uncert
+            '''
         return outputs
 
     def _forward_proj(self, outputs, out_name, t_side):
@@ -553,17 +582,6 @@ class TiO_Depth(Base_of_Model):
                 else:
                     raw_img = self.inputs[target_name]
                 
-                # with torch.no_grad():
-                #     raw_feats = self.feat_net.get_feats(raw_img)
-                # synth_feats = self.feat_net.get_feats(projected_img)
-                # for feat_idx in range(3):
-                #     rawf_name = 'stereo_raw_feats_{}_{}_{}'.format(
-                #         id_frame, feat_idx, t_side)
-                #     outputs[rawf_name] = raw_feats[feat_idx]
-                #     synthf_name = 'stereo_synth_feats_{}_{}_{}'.format(
-                #         id_frame, feat_idx, t_side)
-                #     outputs[synthf_name] = synth_feats[feat_idx] 
-        
         return outputs
 
     def _disp2depth(self, disp):

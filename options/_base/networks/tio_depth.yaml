@@ -15,6 +15,7 @@ model:
     set_fuse_mode: OccLap
     discrete_warp: True
     params_trained: Unified-BB*1-CA*1+DE*0.1-MO*1+DE*0.1
+    use_uncertainty: False
     
 pred_size: [384, 1280]
 pred_norm: [0, 0, 0]
