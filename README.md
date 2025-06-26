@@ -12,22 +12,22 @@ Acesta este cel care se ocupă cu comunicarea celor două rețele pentru generar
 
 În varianta clasică acest bloc nu este suficient de expresiv, reprezentând o simplă atenție încrucișată
 
-![This is an alt text.](/ImagesReadME/MFM "This is a sample image.")
+![This is an alt text.](/ImagesReadME/MFM.png "This is a sample image.")
 
 Mai jos este varianta propusă care folosește volume multiple, filtre tridimensionale și fuziune adaptivă.
 
-![This is an alt text.](/ImagesReadME/DCHF "This is a sample image.")
+![This is an alt text.](/ImagesReadME/DCHF.png "This is a sample image.")
 
-![This is an alt text.](/ImagesReadME/Hourglass "This is a sample image.")
+![This is an alt text.](/ImagesReadME/Hourglass.png "This is a sample image.")
 
 ## Predicții
 Pentru a rula predicții se poate utiliza notebook-ul atașat acestui repository, cu mențiunea că trebuie descărcat și modelul antrenat.
 https://drive.google.com/drive/folders/1g5A43tpyG4hiGFsApZQOF8U-Dw60Xb6P?usp=sharing
 
 ## Diagrame de clasă
-![This is an alt text.](/ImagesReadME/DiagramaClaseModel "This is a sample image.") 
+![This is an alt text.](/ImagesReadME/DiagramaClaseModel.png "This is a sample image.") 
 
-![This is an alt text.](/ImagesReadME/DiagramaClaseDecodificator "This is a sample image.")
+![This is an alt text.](/ImagesReadME/DiagramaClaseDecodificator.png "This is a sample image.")
 
 ## Setup
 Pentru antrenarea modelului a fost folosită o placă NVIDIA GeForce RTX 4070 Ti.  
