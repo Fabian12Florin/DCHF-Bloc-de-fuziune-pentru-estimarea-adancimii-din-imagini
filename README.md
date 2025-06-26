@@ -5,7 +5,7 @@
 ## Arhitectura modelului
 Modelul folosește o arhitectură siameză, cu două sub-rețele pentru estimarea adâncimii monoculare.
 
-![This is an alt text.](/ImagesReadME/TiO-Depth "This is a sample image.")
+![This is an alt text.](/ImagesReadME/TiO-Depth.png "This is a sample image.")
 
 ## Blocul MFM 
 Acesta este cel care se ocupă cu comunicarea celor două rețele pentru generarea informațiilor stereo
